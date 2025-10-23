@@ -1,0 +1,42 @@
+# ===================================================================
+# Arquivo de Configuração Principal para o Coletor de API Simplificado
+# ===================================================================
+
+[general]
+# Intervalo entre os ciclos completos de coleta (todas as URLs) em segundos.
+collection_interval_seconds = 300
+
+[logging]
+# (Opcional) Caminho completo para o arquivo de log dentro do contêiner/máquina.
+# Se deixado em branco ou comentado, logará apenas no console.
+# Exemplo Linux/Container: /var/log/api-collector/collector.log
+# log_file_path = /var/log/api-collector/collector.log
+log_file_path =
+
+# (Opcional) Rotação de logs: 'S' segundos, 'M' minutos, 'H' horas, 'D' dias, 'W0'-'W6' dia da semana.
+log_rotation_interval = D
+
+# (Opcional) Quantidade de arquivos de log antigos a serem mantidos.
+log_backup_count = 7
+
+[sap_auth]
+# Credenciais para o fluxo OAuth2 da SAP Cloud ALM
+client_id = 
+client_secret = 
+token_url = 
+
+[sap_endpoints]
+# URLs completas dos endpoints da SAP ALM a serem coletados.
+# A chave (ex: idoc_logs, abap_ws_provider_logs) será usada como 'source_identifier' no Datadog.
+# IMPORTANTE: Use %% para escapar qualquer caractere % na URL (ex: em %20 para espaços).
+idoc_logs = https://us10.alm.cloud.sap/api/calm-logs/v1/logs?provider=im&format=protobuf-json&serviceId=ac8ef5b8-1d0a-495f-9ff5-db3cdb744d84&category=IDoc&period=5M&limit=100&onLimit=TRUNCATE
+abap_ws_provider_logs = https://us10.alm.cloud.sap/api/calm-logs/v1/logs?provider=exm.im;im&format=protobuf-json&serviceId=ac8ef5b8-1d0a-495f-9ff5-db3cdb744d84&category=ABAP%%20Web%%20Service%%20Provider&period=60M&limit=100&onLimit=TRUNCATE
+# Adicione outras URLs aqui se necessário, uma por linha, com uma chave única.
+# outra_fonte_logs = https://...
+
+[datadog]
+# Credenciais e configurações do Datadog
+api_key = 
+log_url = https://http-intake.logs.datadoghq.com/api/v2/logs
+# (Opcional) Tag de ambiente para o Datadog (ex: env:dev, env:prd)
+env_tag = env:dev
