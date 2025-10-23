@@ -11,7 +11,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copia o script principal para o diretório de trabalho.
 # Certifique-se que o nome do arquivo aqui corresponde ao seu arquivo .py!
-COPY main_simplified.py .
+COPY main.py .
 # O config.ini será montado via Secret, não copiado para a imagem.
 
 # Comando que será executado quando o contêiner iniciar.
