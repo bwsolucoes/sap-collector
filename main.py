@@ -18,7 +18,6 @@ logger.setLevel(logging.INFO)
 logger.addHandler(console_handler)
 
 # --- Constantes ---
-# Caminho padrão para o arquivo de configuração dentro do container
 CONFIG_PATH = '/app/config.ini'
 
 # --- Funções Auxiliares ---
@@ -60,35 +59,48 @@ def setup_file_logging(config: configparser.ConfigParser):
     except Exception as e:
         logger.error(f"Erro ao configurar logging para arquivo: {e}. Usando apenas console.")
 
-def send_payload_to_datadog(payload: Any, config: configparser.ConfigParser, source_identifier: str):
-    """Envia o payload JSON completo para o endpoint de logs do Datadog."""
+def send_log_record_to_datadog(log_record: Dict[str, Any], resource_attributes: Dict[str, str], config: configparser.ConfigParser, source_identifier: str):
+    """Envia um único logRecord para o endpoint de logs do Datadog."""
     try:
         api_key = config.get('datadog', 'api_key')
         dd_url = config.get('datadog', 'log_url')
         env_tag = config.get('datadog', 'env_tag', fallback="env:not_set")
 
         headers = {'Content-Type': 'application/json', 'DD-API-KEY': api_key}
-        hostname = os.getenv("HOSTNAME", "k8s-pod-unknown") # Prioriza hostname do K8s
+        hostname = os.getenv("HOSTNAME", "k8s-pod-unknown")
 
+        # Constrói tags adicionais a partir dos atributos do resource
+        resource_tags_list = [f"sap_resource_{k.replace('.', '_')}:{v}" for k, v in resource_attributes.items()]
+        resource_tags = ",".join(resource_tags_list)
+        
+        # Tags finais combinadas
+        ddtags = f"{env_tag},sap_source:{source_identifier}"
+        if resource_tags:
+            ddtags += f",{resource_tags}"
+
+        # Payload para o Datadog: O campo 'message' contém o objeto logRecord
         dd_payload = {
             "ddsource": f"sap_cloud_alm_{source_identifier}",
-            "ddtags": f"{env_tag},sap_source:{source_identifier}",
+            "ddtags": ddtags,
             "hostname": hostname,
             "service": "sap-alm-log-collector",
-            "message": payload
+            "message": log_record # Envia o objeto logRecord como mensagem principal
         }
 
-        logger.info(f"Enviando payload da fonte '{source_identifier}' para Datadog...")
+        # Tenta obter um ID único do log record para logging, se existir
+        record_id = log_record.get("traceId", log_record.get("timeUnixNano", "N/A"))
+
+        logger.info(f"Enviando log record (ID: {record_id}) da fonte '{source_identifier}' para Datadog...")
         response = requests.post(dd_url, headers=headers, json=dd_payload, timeout=15)
         response.raise_for_status()
-        logger.info(f"Payload da fonte '{source_identifier}' enviado com sucesso para Datadog (Status: {response.status_code}).")
+        logger.debug(f"Log record (ID: {record_id}) da fonte '{source_identifier}' enviado com sucesso (Status: {response.status_code}).") # Debug para não poluir muito
 
     except requests.exceptions.RequestException as e:
-        logger.error(f"Erro de rede ao enviar payload '{source_identifier}' para Datadog: {e}")
+        logger.error(f"Erro de rede ao enviar log record '{source_identifier}' para Datadog: {e}")
     except configparser.NoOptionError as e:
         logger.error(f"Erro de configuração Datadog: Chave '{e.option}' não encontrada na seção '{e.section}'.")
     except Exception as e:
-        logger.error(f"Erro inesperado ao enviar payload '{source_identifier}' para Datadog: {e}")
+        logger.error(f"Erro inesperado ao enviar log record '{source_identifier}' para Datadog: {e}")
 
 # --- Funções SAP ---
 
@@ -148,12 +160,6 @@ def fetch_sap_data(api_url: str, config: configparser.ConfigParser) -> Optional[
         try:
             payload = response.json()
             logger.info(f"Dados recebidos com sucesso da API SAP (Status: {response.status_code}). URL: {url_display}")
-            if isinstance(payload, dict) and "resourceLogs" in payload:
-                 logger.info(f"Payload contém {len(payload.get('resourceLogs', []))} resourceLog(s).")
-            elif isinstance(payload, list):
-                 logger.info(f"Payload é uma lista com {len(payload)} item(ns).")
-            else:
-                 logger.info("Payload recebido não é um dict com 'resourceLogs' nem uma lista.")
             return payload
         except json.JSONDecodeError as json_err:
             logger.error(f"Falha ao decodificar JSON da API SAP (Status: {response.status_code}). Erro: {json_err}. Resposta: {response.text[:500]}...")
@@ -175,17 +181,16 @@ if __name__ == "__main__":
     config = load_config()
     setup_file_logging(config)
 
-    # Carrega as URLs da seção [sap_endpoints] do config.ini
     sap_endpoints = {}
     try:
         if config.has_section('sap_endpoints'):
             sap_endpoints = dict(config.items('sap_endpoints'))
             if not sap_endpoints:
-                 logger.critical("Seção [sap_endpoints] está vazia no config.ini. Nenhuma URL para buscar. Encerrando.")
+                 logger.critical("Seção [sap_endpoints] está vazia no config.ini. Encerrando.")
                  sys.exit(1)
             logger.info(f"Carregadas {len(sap_endpoints)} URLs da seção [sap_endpoints].")
         else:
-            logger.critical("Seção [sap_endpoints] não encontrada no config.ini. Nenhuma URL para buscar. Encerrando.")
+            logger.critical("Seção [sap_endpoints] não encontrada no config.ini. Encerrando.")
             sys.exit(1)
     except Exception as e:
         logger.critical(f"Erro ao ler a seção [sap_endpoints] do config.ini: {e}. Encerrando.")
@@ -198,28 +203,81 @@ if __name__ == "__main__":
         while True:
             logger.info("--- Iniciando ciclo de coleta SAP ---")
             start_time = time.time()
+            total_records_sent_cycle = 0
 
-            # Itera sobre as URLs carregadas do config.ini
             for source_id, url in sap_endpoints.items():
                 logger.info(f"Processando fonte: {source_id}")
-                if not url: # Pula se a URL estiver vazia no config
+                if not url:
                     logger.warning(f"URL para fonte '{source_id}' está vazia no config.ini. Pulando.")
                     continue
 
                 sap_payload = fetch_sap_data(url, config)
+                records_sent_source = 0
 
-                if sap_payload is not None:
-                    if sap_payload: # Verifica se não é vazio ({}, [])
-                        send_payload_to_datadog(sap_payload, config, source_id)
-                    else:
-                        logger.info(f"Payload recebido da fonte '{source_id}' está vazio. Nenhum dado para enviar.")
-                else:
+                if sap_payload and isinstance(sap_payload, dict) and 'resourceLogs' in sap_payload:
+                    resource_logs = sap_payload.get('resourceLogs', [])
+                    if not isinstance(resource_logs, list):
+                        logger.warning(f"Formato inesperado: 'resourceLogs' não é uma lista na resposta de '{source_id}'. Pulando processamento.")
+                        continue
+
+                    for resource_log in resource_logs:
+                        if not isinstance(resource_log, dict): continue # Ignora itens inválidos
+
+                        # Extrai atributos do resource para adicionar como tags
+                        resource_attributes = {}
+                        resource = resource_log.get("resource", {})
+                        if isinstance(resource, dict):
+                            attributes = resource.get("attributes", [])
+                            if isinstance(attributes, list):
+                                for attr in attributes:
+                                     if isinstance(attr, dict) and "key" in attr and isinstance(attr.get("value"), dict):
+                                         value_obj = attr.get("value")
+                                         # Pega o primeiro valor de string encontrado (stringValue, intValue, etc.)
+                                         simple_value = next((v for k, v in value_obj.items() if isinstance(v, (str, int, float, bool))), None)
+                                         if attr["key"] and simple_value is not None:
+                                             resource_attributes[attr["key"]] = str(simple_value)
+
+
+                        scope_logs = resource_log.get('scopeLogs', [])
+                        if not isinstance(scope_logs, list):
+                             logger.warning(f"Formato inesperado: 'scopeLogs' não é uma lista dentro de um resourceLog para '{source_id}'. Pulando.")
+                             continue
+
+                        for scope_log in scope_logs:
+                            if not isinstance(scope_log, dict): continue # Ignora itens inválidos
+
+                            log_records = scope_log.get('logRecords', [])
+                            if not isinstance(log_records, list):
+                                logger.warning(f"Formato inesperado: 'logRecords' não é uma lista dentro de um scopeLog para '{source_id}'. Pulando.")
+                                continue
+
+                            if not log_records:
+                                logger.info(f"Nenhum logRecord encontrado neste scopeLog para '{source_id}'.")
+                                continue
+
+                            logger.info(f"Encontrados {len(log_records)} logRecord(s) para enviar da fonte '{source_id}'.")
+                            for log_record in log_records:
+                                if isinstance(log_record, dict):
+                                    send_log_record_to_datadog(log_record, resource_attributes, config, source_id)
+                                    records_sent_source += 1
+                                else:
+                                    logger.warning(f"Item inválido encontrado na lista logRecords para '{source_id}': {type(log_record)}")
+                            # Pequena pausa pode ser útil se houver muitos records para não sobrecarregar Datadog
+                            time.sleep(0.1)
+
+                    logger.info(f"Total de {records_sent_source} logRecord(s) enviados para a fonte '{source_id}'.")
+                    total_records_sent_cycle += records_sent_source
+
+                elif sap_payload is None:
                     logger.warning(f"Falha ao buscar dados da fonte '{source_id}'. Verifique logs de erro anteriores.")
+                else:
+                    logger.warning(f"Payload recebido da fonte '{source_id}' não contém 'resourceLogs' ou não é um dicionário. Payload: {str(sap_payload)[:200]}...")
+
                 time.sleep(2) # Pausa entre requisições SAP
 
             end_time = time.time()
             elapsed = end_time - start_time
-            logger.info(f"--- Ciclo de coleta SAP finalizado em {elapsed:.2f} segundos ---")
+            logger.info(f"--- Ciclo de coleta SAP finalizado em {elapsed:.2f} segundos. Total de {total_records_sent_cycle} logRecord(s) enviados neste ciclo. ---")
 
             wait_time = max(0, interval - elapsed)
             logger.info(f"Aguardando {wait_time:.2f} segundos para o próximo ciclo...")
