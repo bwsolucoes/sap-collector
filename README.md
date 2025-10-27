@@ -1,4 +1,4 @@
-# Coletor Simplificado de Logs SAP ALM para Datadog
+# Coletor de Logs SAP ALM para Datadog
 
 ## Visão Geral
 
@@ -22,7 +22,7 @@ Projetado para rodar como um contêiner em Kubernetes (AKS no Azure, EKS na AWS,
 
 ## Arquivos do Projeto
 
-* `main_simplified.py`: Script Python principal.
+* `main.py`: Script Python principal.
 * `requirements.txt`: Dependências (`requests`).
 * `Dockerfile`: Para construir a imagem do contêiner.
 * `config.ini.example`: Template do arquivo de configuração.
